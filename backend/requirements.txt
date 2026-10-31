@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+sqlalchemy
+reportlab
+httpx
+python-multipart
+pypdf
+pillow
+# for PostgreSQL also: psycopg2-binary
