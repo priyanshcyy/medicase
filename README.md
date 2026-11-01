@@ -44,6 +44,18 @@ record summary (automatic, or AI with `ANTHROPIC_API_KEY`), PDF export of any se
 
 **Security fixes in v6** - tokens expire after 12 hours; share codes use a secure random generator, expire after 30 minutes and lock out after 5 wrong tries per 15 minutes; duplicate consent rows are prevented; PDF export tells you if an attached file could not be merged.
 
+## New in v7
+- **Appointments:** the doctor home screen has an Appointments panel (today, patient requests, next 30 days). Doctors schedule by patient ID (they need access to the record), confirm or decline patient requests, mark visits done, or cancel with a reason. Patients see their appointments, request one with any doctor who has access, and cancel. Every change sends a message to the other side, and double-booking a doctor's time is blocked. Demo: DR1001 has appointments today, tomorrow and one patient request (run `python seed.py` again).
+- **Files are optional:** a document can be a file, a text note, or both. A note alone is fine.
+
+## New in v8: sign-up and verification
+- **Patient sign-up** needs a 12-digit APAAR ID (format check only) and three compulsory documents: birth certificate, government photo ID and APAAR ID card. **Doctor sign-up** needs the medical council registration number, degree, hospital, a 12-digit Aadhaar number and three compulsory documents: degree certificate, registration certificate and photo ID.
+- New accounts start as *pending*. They cannot log in until the verification team approves them. Rejected applicants see the reason and can apply again.
+- The verification team uses a separate, unlisted login. Set `ADMIN_ID` and `ADMIN_PASSWORD` as environment variables before running the backend.
+- Aadhaar numbers are never stored in full: only the last 4 digits and a keyed hash (to stop duplicates). Do not upload an unmasked Aadhaar card.
+- This is a human review, not an automatic check. Real APAAR (via DigiLocker / Academic Bank of Credits), NMC Indian Medical Register and Aadhaar verification need government or licensed-partner APIs.
+- Re-run `python seed.py` (new columns).
+
 ## Real images
 Put open-licence images in `backend/real_images/xray` and `backend/real_images/scan`, then run `python seed.py` (see the README in that folder). Without them, synthetic placeholders are used.
 

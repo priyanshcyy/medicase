@@ -1,23 +1,26 @@
+import {Signup,Admin} from "./Signup.jsx"
+import {DoctorAppts,PatientAppts} from "./Appointments.jsx"
 import {useState,useEffect} from "react"
 import {api,upload,setToken} from "./api.js"
 import {Dashboard,Messages,Today,Alerts} from "./Monitor.jsx"
 const KINDS=["Birth","Vaccination","Illness","Surgery","Prescription","Report","Discharge","X-ray","Scan","Other"]
 
 export default function App(){
-  const [me,setMe]=useState(null)
-  if(!me)return <Login onLogin={u=>{setToken(u.token);setMe(u)}}/>
+  const [me,setMe]=useState(null),[signup,setSignup]=useState(false)
+  if(!me)return signup?<Signup back={()=>setSignup(false)}/>:<Login onLogin={u=>{setToken(u.token);setMe(u)}} onSignup={()=>setSignup(true)}/>
   return <div className="app"><header><b>✚ MediCase</b><span>{me.name} · {me.role}{me.city?` · ${me.city}`:""}</span><button className="ghost" onClick={()=>{setToken("");setMe(null)}}>Log out</button></header>
-    {me.role==="doctor"?<Doctor me={me}/>:<Patient me={me}/>}</div>
+    {me.role==="admin"?<Admin/>:me.role==="doctor"?<Doctor me={me}/>:<Patient me={me}/>}</div>
 }
 
-function Login({onLogin}){
+function Login({onLogin,onSignup}){
   const [role,setRole]=useState("doctor"),[id,setId]=useState(""),[pw,setPw]=useState(""),[err,setErr]=useState("")
   const go=async e=>{e.preventDefault();try{onLogin(await api("/login",{body:{role,id,password:pw}}))}catch(x){setErr(x.message)}}
   return <div className="gate"><form className="box" onSubmit={go}><h2>✚ MediCase</h2><p className="muted">Smarter Records. Better Continuity. Secure Care.</p>
-    <div className="tabs">{["doctor","patient"].map(r=><button type="button" key={r} className={role===r?"on":""} onClick={()=>{setRole(r);setErr("")}}>{r==="doctor"?"Doctor":"Patient"} login</button>)}</div>
-    <label>{role==="doctor"?"Doctor ID":"Patient ID"}<input value={id} onChange={e=>setId(e.target.value)} required/></label>
+    <div className="tabs">{(location.hash==="#admin"?["doctor","patient","admin"]:["doctor","patient"]).map(r=><button type="button" key={r} className={role===r?"on":""} onClick={()=>{setRole(r);setErr("")}}>{({doctor:"Doctor",patient:"Patient",admin:"Admin"})[r]} login</button>)}</div>
+    <label>{role==="doctor"?"Doctor ID":role==="admin"?"Admin ID":"Patient ID"}<input value={id} onChange={e=>setId(e.target.value)} required/></label>
     <label>Password<input type="password" value={pw} onChange={e=>setPw(e.target.value)} required/></label>
     <p className="err">{err}</p><button className="btn wide">Log in</button>
+    <button type="button" className="link" onClick={onSignup}>New here? Create an account</button>
     <p className="muted small">Demo: DR1001 / doc123 · MC1001 / pat123. Synthetic data only.</p></form></div>
 }
 
@@ -27,7 +30,7 @@ function Doctor({me}){
   useEffect(()=>{if(open)return;const t=setTimeout(()=>api("/patients?"+new URLSearchParams(f)).then(setRows).catch(()=>{}),250);return()=>clearTimeout(t)},[f,open])
   if(open)return <Record pid={open.pid} start={open.view} me={me} back={()=>setOpen(null)}/>
   const go=(pid,view)=>setOpen({pid,view})
-  return <><Alerts open={go}/><div className="panel"><h3>Patient directory</h3>
+  return <><DoctorAppts open={go}/><Alerts open={go}/><div className="panel"><h3>Patient directory</h3>
     <p className="muted small">Search patients across states. A full record opens only with the patient's consent (or a logged emergency override).</p>
     <div className="bar"><input placeholder="Search name, patient ID or ABHA…" value={f.q} onChange={e=>setF({...f,q:e.target.value})}/>
       <select value={f.state} onChange={e=>setF({...f,state:e.target.value,city:""})}><option value="">All states</option>{Object.keys(meta).map(s=><option key={s}>{s}</option>)}</select>
@@ -79,7 +82,7 @@ function Record({pid,me,back,start,ver=0,unread=0,onChange}){
 function Patient({me}){
   const [a,setA]=useState(null),[k,setK]=useState(0),bump=()=>{setK(x=>x+1);load()},load=()=>api("/me/access").then(setA).catch(()=>{}),post=p=>api(p,{method:"POST"}).then(load)
   useEffect(()=>{load()},[])
-  return <div className="stack"><Today ver={k} onChange={bump}/>{a&&<div className="grid2">
+  return <div className="stack"><Today ver={k} onChange={bump}/><PatientAppts pid={me.id} docs={a?a.granted:[]}/>{a&&<div className="grid2">
     <div className="panel"><h3>Share with a doctor in another city</h3><p className="muted small">Generate a one-time code and give it to your doctor along with your ID ({me.id}).</p>
       <button className="btn" onClick={()=>post("/me/code")}>Generate share code</button>{a.code&&<span className="code">{a.code}</span>}</div>
     <div className="panel"><h3>Consent requests ({a.pending.length})</h3>{a.pending.map(c=><div className="row" key={c.id}><span>{c.doctor}<small>{c.speciality} · {c.city}</small></span><span><button className="btn sm" onClick={()=>post(`/me/consent/${c.id}/approve`)}>Approve</button> <button className="btn sm ghost" onClick={()=>post(`/me/consent/${c.id}/deny`)}>Deny</button></span></div>)}{!a.pending.length&&<p className="muted small">No pending requests.</p>}</div>
@@ -95,11 +98,11 @@ function Thumb({id}){const [u,setU]=useState("");useEffect(()=>{let url;api(`/do
 function AddDoc({pid,me,done}){
   const kinds=me.role==="doctor"?KINDS.filter(k=>k!=="Birth"):["Report","X-ray","Scan","Prescription","Other"],blank={kind:kinds[0],title:"",date:new Date().toISOString().slice(0,10),body:""}
   const [f,setF]=useState(blank),[file,setFile]=useState(null),[n,setN]=useState(0),[busy,setBusy]=useState(false),set=k=>e=>setF({...f,[k]:e.target.value})
-  const go=async e=>{e.preventDefault();if(!file)return alert("Choose a file to upload.");if(file.size>10*1024*1024)return alert("File is larger than 10 MB.")
-    const fd=new FormData();Object.entries(f).forEach(([k,v])=>fd.append(k,v));fd.append("file",file);setBusy(true)
+  const go=async e=>{e.preventDefault();if(!file&&!f.body.trim())return alert("Attach a file or write the details in the note.");if(file&&file.size>10*1024*1024)return alert("File is larger than 10 MB.")
+    const fd=new FormData();Object.entries(f).forEach(([k,v])=>fd.append(k,v));if(file)fd.append("file",file);setBusy(true)
     try{await upload(`/patients/${pid}/documents`,fd);setF(blank);setFile(null);setN(n+1);done()}catch(x){alert(x.message)}setBusy(false)}
-  return <form className="panel" onSubmit={go}><h3>Upload a document</h3><p className="muted small">X-ray, scan, lab report, prescription or any other file. PDF, JPG, PNG or WebP, up to 10 MB.</p>
-    <div className="bar"><select value={f.kind} onChange={set("kind")}>{kinds.map(k=><option key={k}>{k}</option>)}</select><input type="date" required value={f.date} onChange={set("date")}/><input required placeholder="Title (e.g. Chest X-ray)" value={f.title} onChange={set("title")}/></div>
+  return <form className="panel" onSubmit={go}><h3>Add to this record</h3><p className="muted small">Attach a file (PDF, JPG, PNG or WebP, up to 10 MB), or just write a note. You can do both.</p>
+    <div className="bar"><select value={f.kind} onChange={set("kind")}>{kinds.map(k=><option key={k}>{k}</option>)}</select><input type="date" required value={f.date} onChange={set("date")}/><input required placeholder="Title (e.g. Chest X-ray, Follow-up note)" value={f.title} onChange={set("title")}/></div>
     <input key={n} type="file" accept=".pdf,.jpg,.jpeg,.png,.webp,application/pdf,image/*" onChange={e=>setFile(e.target.files[0]||null)}/>
-    <textarea rows="2" placeholder="Notes (optional)" value={f.body} onChange={set("body")}/><button className="btn" disabled={busy}>{busy?"Uploading…":"Upload"}</button></form>
+    <textarea rows="3" placeholder="Note or details (required if there is no file)" value={f.body} onChange={set("body")}/><button className="btn" disabled={busy}>{busy?"Saving…":"Save"}</button></form>
 }

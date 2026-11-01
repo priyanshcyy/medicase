@@ -12,18 +12,16 @@ from reportlab.lib.styles import getSampleStyleSheet
 from PIL import Image as PI
 from reportlab.platypus import Image as RLImage,SimpleDocTemplate,Paragraph,Spacer,Table,TableStyle,KeepTogether
 
-URL=os.getenv("DATABASE_URL","sqlite:///./medicase.db")
-if URL.startswith("postgres://"):
-    URL = URL.replace("postgres://", "postgresql://", 1)
+URL=os.getenv("DATABASE_URL","sqlite:///./medicase.db")  # PostgreSQL: postgresql+psycopg2://user:pw@localhost/medicase
 SECRET=os.getenv("SECRET","dev-secret-change-me").encode()
 eng=create_engine(URL,connect_args={"check_same_thread":False} if URL.startswith("sqlite") else {})
 SL=sessionmaker(eng);Base=declarative_base()
 H=lambda s:hashlib.sha256(s.encode()).hexdigest()
 
 class Doctor(Base):
-    __tablename__="doctors";id=Column(String,primary_key=True);name=Column(String);speciality=Column(String);state=Column(String);city=Column(String);pw=Column(String)
+    __tablename__="doctors";id=Column(String,primary_key=True);status=Column(String,default="verified");kyc_note=Column(String,default="");reg_no=Column(String,index=True);council=Column(String);degree=Column(String);hospital=Column(String);aadhaar_last4=Column(String);aadhaar_hash=Column(String,index=True);name=Column(String);speciality=Column(String);state=Column(String);city=Column(String);pw=Column(String)
 class Patient(Base):
-    __tablename__="patients";id=Column(String,primary_key=True);name=Column(String);dob=Column(String);sex=Column(String);blood=Column(String);allergies=Column(String);state=Column(String,index=True);city=Column(String,index=True);pw=Column(String);code=Column(String,default="");code_exp=Column(String,default="");abha=Column(String,index=True)
+    __tablename__="patients";id=Column(String,primary_key=True);status=Column(String,default="verified");kyc_note=Column(String,default="");apaar=Column(String,index=True);name=Column(String);dob=Column(String);sex=Column(String);blood=Column(String);allergies=Column(String);state=Column(String,index=True);city=Column(String,index=True);pw=Column(String);code=Column(String,default="");code_exp=Column(String,default="");abha=Column(String,index=True)
 class Document(Base):
     __tablename__="documents";id=Column(Integer,primary_key=True);patient_id=Column(String,ForeignKey("patients.id"),index=True);doctor_id=Column(String,ForeignKey("doctors.id"));kind=Column(String);title=Column(String);date=Column(String);body=Column(Text);fname=Column(String);mime=Column(String);file=Column(LargeBinary)
 class Consent(Base):
@@ -40,6 +38,10 @@ class Order(Base):
     __tablename__="orders";id=Column(Integer,primary_key=True);patient_id=Column(String,index=True);doctor_id=Column(String);name=Column(String);every_days=Column(Integer);start=Column(String)
 class Limit(Base):
     __tablename__="limits";patient_id=Column(String,primary_key=True);data=Column(Text,default="{}")
+class Appt(Base):
+    __tablename__="appointments";id=Column(Integer,primary_key=True);patient_id=Column(String,index=True);doctor_id=Column(String,index=True);at=Column(String,index=True);reason=Column(String,default="");status=Column(String,default="scheduled");by=Column(String,default="doctor");note=Column(String,default="")
+class Kyc(Base):
+    __tablename__="kyc_docs";id=Column(Integer,primary_key=True);owner_role=Column(String,index=True);owner_id=Column(String,index=True);kind=Column(String);fname=Column(String);mime=Column(String);file=Column(LargeBinary);at=Column(String)
 Base.metadata.create_all(eng)
 
 def now(d=0):return (dt.datetime.now()+dt.timedelta(days=d)).strftime("%Y-%m-%d %H:%M")
@@ -81,26 +83,6 @@ def patient_or_404(s,pid):
 
 app=FastAPI(title="MediCase API")
 app.add_middleware(CORSMiddleware,allow_origins=["*"],allow_headers=["*"],allow_methods=["*"],expose_headers=["X-Skipped"])
-
-@app.on_event("startup")
-def startup_event():
-    Base.metadata.create_all(eng)
-    with SL() as s:
-        try:
-            if s.query(Doctor).count() == 0:
-                print("Database empty, auto-seeding...")
-                from seed import seed_db
-                seed_db(drop_first=False)
-        except Exception as e:
-            print("Auto-seed error:", e)
-
-@app.get("/")
-def root():
-    return {"status": "ok", "service": "MediCase API", "version": "6.0"}
-
-@app.get("/health")
-def health():
-    return {"status": "healthy"}
 class Login(BaseModel):role:str;id:str;password:str
 class Code(BaseModel):code:str
 class Reason(BaseModel):reason:str
@@ -109,9 +91,14 @@ class NewDoc(BaseModel):kind:str;title:str;date:str;body:str=""
 
 @app.post("/login")
 def login(b:Login,s=Depends(db)):
+    if b.role=="admin":
+        if not(hmac.compare_digest(b.id.strip().upper(),ADMIN_ID) and hmac.compare_digest(H(b.password),H(ADMIN_PW))):raise HTTPException(401,"Wrong ID or password")
+        return {"token":mint("admin",ADMIN_ID),"role":"admin","id":ADMIN_ID,"name":"Verification team","state":"","city":""}
     if b.role not in("doctor","patient"):raise HTTPException(400,"Bad role")
     o=s.get(Doctor if b.role=="doctor" else Patient,b.id.strip().upper())
     if not o or o.pw!=H(b.password):raise HTTPException(401,"Wrong ID or password")
+    if o.status=="pending":raise HTTPException(403,"Your account is waiting for verification. You can log in after the verification team approves your documents.")
+    if o.status=="rejected":raise HTTPException(403,"Your application was rejected: "+(o.kyc_note or "the documents could not be verified")+". Please sign up again with the correct documents.")
     return {"token":mint(b.role,o.id),"role":b.role,"id":o.id,"name":o.name,"state":o.state,"city":o.city}
 
 @app.get("/meta")
@@ -123,7 +110,7 @@ def meta(s=Depends(db)):
 @app.get("/patients")
 def plist(q:str="",state:str="",city:str="",u=Depends(who),s=Depends(db)):
     need(u,"doctor")
-    st=select(Patient).order_by(Patient.name).limit(60)
+    st=select(Patient).where(Patient.status=="verified").order_by(Patient.name).limit(60)
     if q:st=st.where(or_(Patient.name.ilike(f"%{q}%"),Patient.id.ilike(f"%{q}%"),Patient.abha.ilike(f"%{q}%")))
     if state:st=st.where(Patient.state==state)
     if city:st=st.where(Patient.city==city)
@@ -217,7 +204,7 @@ def my_access(u=Depends(who),s=Depends(db)):
     need(u,"patient");p=s.get(Patient,u["u"])
     dn={d.id:d for d in s.scalars(select(Doctor))}
     cs=s.scalars(select(Consent).where(Consent.patient_id==p.id,Consent.status.in_(["pending","granted"]))).all()
-    f=lambda c:{"id":c.id,"doctor":dn[c.doctor_id].name,"city":dn[c.doctor_id].city,"speciality":dn[c.doctor_id].speciality}
+    f=lambda c:{"id":c.id,"did":c.doctor_id,"doctor":dn[c.doctor_id].name,"city":dn[c.doctor_id].city,"speciality":dn[c.doctor_id].speciality}
     lg=s.scalars(select(Log).where(Log.patient_id==p.id).order_by(Log.id.desc()).limit(15))
     return {"code":p.code if p.code_exp>=now() else "","unread":s.scalar(select(func.count(Msg.id)).where(Msg.patient_id==p.id,Msg.sender=="doctor",Msg.read==0)),"pending":[f(c) for c in cs if c.status=="pending"],"granted":[f(c) for c in cs if c.status=="granted"],"log":[{"who":l.who,"what":l.what,"at":l.at} for l in lg]}
 
@@ -269,20 +256,23 @@ def sniff(b):
     return None
 
 @app.post("/patients/{pid}/documents")
-def add_doc(pid:str,kind:str=Form(...),title:str=Form(...),date:str=Form(...),body:str=Form(""),file:UploadFile=File(...),u=Depends(who),s=Depends(db)):
+def add_doc(pid:str,kind:str=Form(...),title:str=Form(...),date:str=Form(...),body:str=Form(""),file:UploadFile|None=File(None),u=Depends(who),s=Depends(db)):
     patient_or_404(s,pid)
     if not allowed(s,u,pid):raise HTTPException(403,"Patient consent required")
     if kind not in ([k for k in KINDS if k!="Birth"] if u["r"]=="doctor" else ["Report","X-ray","Scan","Prescription","Other"]):raise HTTPException(400,"This type is not allowed for you")
     try:dt.date.fromisoformat(date)
     except ValueError:raise HTTPException(400,"Enter a valid date")
     if not title.strip():raise HTTPException(400,"Title is required")
-    data=file.file.read(10*1024*1024+1)
-    if len(data)>10*1024*1024:raise HTTPException(400,"File is larger than 10 MB")
-    mime=sniff(data)
-    if not mime:raise HTTPException(400,"Upload a PDF, JPG, PNG or WebP file")
-    fn=re.sub(r"[^\w.\- ]","_",file.filename or "file")[:80]
-    s.add(Document(patient_id=pid,doctor_id=u["u"] if u["r"]=="doctor" else None,kind=kind,title=title.strip(),date=date,body=body.strip(),file=data,mime=mime,fname=fn))
-    log(s,pid,label(s,u),f"Uploaded {kind}: {title.strip()}");s.commit();return {"ok":True}
+    data=mime=fn=None
+    if file and file.filename:
+        data=file.file.read(10*1024*1024+1)
+        if len(data)>10*1024*1024:raise HTTPException(400,"File is larger than 10 MB")
+        mime=sniff(data)
+        if not mime:raise HTTPException(400,"Upload a PDF, JPG, PNG or WebP file")
+        fn=re.sub(r"[^\w.\- ]","_",file.filename)[:80]
+    elif not body.strip():raise HTTPException(400,"Attach a file or write the details in the note")
+    s.add(Document(patient_id=pid,doctor_id=u["u"] if u["r"]=="doctor" else None,kind=kind,title=title.strip(),date=date,body=body.strip()[:5000],file=data,mime=mime,fname=fn))
+    log(s,pid,label(s,u),f"{'Uploaded' if data else 'Added note'} {kind}: {title.strip()}");s.commit();return {"ok":True}
 
 @app.get("/documents/{did}/file")
 def get_file(did:int,u=Depends(who),s=Depends(db)):
@@ -577,3 +567,151 @@ def alerts(u=Depends(who),s=Depends(db)):
             if f=="urgent" or e["worst"]!="urgent":e["worst"]=f
     unread=[{"id":pid,"name":nm.get(pid,pid),"n":n} for pid,n in s.execute(select(Msg.patient_id,func.count(Msg.id)).where(Msg.doctor_id==u["u"],Msg.sender=="patient",Msg.read==0).group_by(Msg.patient_id))]
     return {"flagged":sorted(flagged.values(),key=lambda e:(e["worst"]!="urgent",-e["count"])),"unread":unread}
+
+
+# ---------------- appointments ----------------
+class ApptIn(BaseModel):at:str;reason:str="";did:str=""
+class ApptAct(BaseModel):note:str=""
+def parse_at(v):
+    try:d=dt.datetime.strptime(v.replace("T"," ")[:16],"%Y-%m-%d %H:%M")
+    except ValueError:raise HTTPException(400,"Enter a valid date and time")
+    if d<dt.datetime.now():raise HTTPException(400,"Choose a time in the future")
+    if d>dt.datetime.now()+dt.timedelta(days=365):raise HTTPException(400,"Choose a date within the next year")
+    return d.strftime("%Y-%m-%d %H:%M")
+def tell(s,pid,did,sender,text):s.add(Msg(patient_id=pid,doctor_id=did,sender=sender,text=text,at=now(),kind="chat",read=0))
+def clash(s,did,at,skip=0):return s.scalar(select(Appt).where(Appt.doctor_id==did,Appt.at==at,Appt.status=="scheduled",Appt.id!=skip))
+
+@app.post("/patients/{pid}/appointments")
+def book(pid:str,b:ApptIn,u=Depends(who),s=Depends(db)):
+    patient_or_404(s,pid)
+    if not allowed(s,u,pid):raise HTTPException(403,"Patient consent required")
+    at=parse_at(b.at);reason=b.reason.strip()[:200]
+    if u["r"]=="doctor":
+        did,status,by=u["u"],"scheduled","doctor"
+        if clash(s,did,at):raise HTTPException(409,"You already have an appointment at that time")
+        tell(s,pid,did,"doctor",f"Appointment scheduled for {at}. {reason}".strip())
+    else:
+        did,status,by=b.did.strip().upper(),"requested","patient"
+        if not s.get(Doctor,did) or pid not in granted(s,did):raise HTTPException(400,"Choose a doctor who has access to your record")
+        tell(s,pid,did,"patient",f"I would like an appointment on {at}. {reason}".strip())
+    s.add(Appt(patient_id=pid,doctor_id=did,at=at,reason=reason,status=status,by=by));log(s,pid,label(s,u),f"Appointment {status} for {at}");s.commit();return {"ok":True}
+
+@app.post("/appointments/{aid}/{act}")
+def appt_act(aid:int,act:str,b:ApptAct,u=Depends(who),s=Depends(db)):
+    a=s.get(Appt,aid)
+    if not a or act not in("confirm","cancel","complete"):raise HTTPException(404,"Not found")
+    isdoc=u["r"]=="doctor" and a.doctor_id==u["u"];ispat=u["r"]=="patient" and a.patient_id==u["u"]
+    if not(isdoc or ispat):raise HTTPException(403,"Not allowed")
+    if a.status in("cancelled","completed"):raise HTTPException(400,"This appointment is already "+a.status)
+    note=b.note.strip()[:200];sender="doctor" if isdoc else "patient"
+    if act=="confirm":
+        if not isdoc or a.status!="requested":raise HTTPException(400,"Nothing to confirm")
+        if clash(s,a.doctor_id,a.at,a.id):raise HTTPException(409,"You already have an appointment at that time")
+        a.status="scheduled";tell(s,a.patient_id,a.doctor_id,"doctor",f"Your appointment on {a.at} is confirmed.")
+    elif act=="complete":
+        if not isdoc or a.status!="scheduled":raise HTTPException(400,"Only a scheduled appointment can be completed")
+        a.status="completed"
+    else:
+        verb="declined" if (isdoc and a.status=="requested") else "cancelled"
+        a.status="cancelled";a.note=note
+        tell(s,a.patient_id,a.doctor_id,sender,(f"Your appointment on {a.at} was {verb} by the doctor." if isdoc else f"I have cancelled my appointment on {a.at}.")+(f" Reason: {note}" if note else ""))
+    s.commit();return {"ok":True}
+
+@app.get("/appointments")
+def appts(u=Depends(who),s=Depends(db)):
+    need(u,"doctor");today=now()[:10];end=(dt.date.today()+dt.timedelta(days=31)).isoformat()
+    rows=s.scalars(select(Appt).where(Appt.doctor_id==u["u"],Appt.status.in_(["requested","scheduled"]),Appt.at>=today,Appt.at<end).order_by(Appt.at)).all()
+    pn={p.id:p.name for p in s.scalars(select(Patient).where(Patient.id.in_({r.patient_id for r in rows})))}
+    f=lambda r:{"id":r.id,"pid":r.patient_id,"name":pn.get(r.patient_id,""),"at":r.at,"reason":r.reason,"status":r.status,"by":r.by}
+    return {"today":[f(r) for r in rows if r.status=="scheduled" and r.at[:10]==today],"requests":[f(r) for r in rows if r.status=="requested"],"upcoming":[f(r) for r in rows if r.status=="scheduled" and r.at[:10]>today]}
+
+@app.get("/me/appointments")
+def my_appts(u=Depends(who),s=Depends(db)):
+    need(u,"patient");today=now()[:10]
+    rows=s.scalars(select(Appt).where(Appt.patient_id==u["u"]).order_by(Appt.at)).all()
+    dn={d.id:d.name for d in s.scalars(select(Doctor))}
+    f=lambda r:{"id":r.id,"doctor":dn.get(r.doctor_id,""),"at":r.at,"reason":r.reason,"status":r.status,"note":r.note}
+    up=[f(r) for r in rows if r.status in("requested","scheduled") and r.at[:10]>=today];ids={x["id"] for x in up}
+    return {"upcoming":up,"earlier":[f(r) for r in reversed(rows) if r.id not in ids][:8]}
+
+
+# ---------------- sign-up and verification ----------------
+ADMIN_ID=os.getenv("ADMIN_ID","ADM001").upper();ADMIN_PW=os.getenv("ADMIN_PASSWORD","admin123")  # change ADMIN_PASSWORD for any real use
+PKYC={"birth_certificate":"Birth certificate","photo_id":"Government photo ID","apaar_card":"APAAR ID card"}
+DKYC={"degree_cert":"Degree certificate","reg_certificate":"Medical council registration certificate","photo_id":"Government photo ID"}
+class Review(BaseModel):note:str=""
+def kyc_read(f,label):
+    data=f.file.read(5*1024*1024+1) if f and f.filename else b""
+    if not data:raise HTTPException(400,f"{label} is required")
+    if len(data)>5*1024*1024:raise HTTPException(400,f"{label} is larger than 5 MB")
+    m=sniff(data)
+    if not m:raise HTTPException(400,f"{label}: upload a PDF, JPG, PNG or WebP file")
+    return data,m,re.sub(r"[^\w.\- ]","_",f.filename)[:80]
+def strong(pw):
+    if len(pw)<8 or not re.search(r"[A-Za-z]",pw) or not re.search(r"\d",pw):raise HTTPException(400,"Password must be at least 8 characters and contain letters and numbers")
+def next_id(s,M,prefix):
+    n=[int(x[len(prefix):]) for x in s.scalars(select(M.id)) if x[len(prefix):].isdigit()]
+    return f"{prefix}{max(n or [1000])+1}"
+def save_kyc(s,role,oid,files):
+    for k,(data,m,fn) in files.items():s.add(Kyc(owner_role=role,owner_id=oid,kind=k,fname=fn,mime=m,file=data,at=now()))
+def drop_old(s,role,old):
+    s.query(Kyc).filter_by(owner_role=role,owner_id=old.id).delete();s.delete(old)
+
+@app.post("/signup/patient")
+def signup_patient(name:str=Form(...),dob:str=Form(...),sex:str=Form(...),blood:str=Form(...),state:str=Form(...),city:str=Form(...),apaar:str=Form(...),password:str=Form(...),allergies:str=Form("None known"),
+    birth_certificate:UploadFile|None=File(None),photo_id:UploadFile|None=File(None),apaar_card:UploadFile|None=File(None),s=Depends(db)):
+    apaar=re.sub(r"[\s-]","",apaar)
+    if not re.fullmatch(r"\d{12}",apaar):raise HTTPException(400,"APAAR ID must be exactly 12 digits")
+    try:d=dt.date.fromisoformat(dob)
+    except ValueError:raise HTTPException(400,"Enter a valid date of birth")
+    if d>dt.date.today() or d.year<1900:raise HTTPException(400,"Enter a valid date of birth")
+    if len(name.strip())<3 or sex not in("Male","Female","Other") or blood not in("A+","A-","B+","B-","AB+","AB-","O+","O-") or not state.strip() or not city.strip():raise HTTPException(400,"Please fill in all details correctly")
+    strong(password)
+    old=s.scalar(select(Patient).where(Patient.apaar==apaar))
+    if old and old.status!="rejected":raise HTTPException(409,"An account with this APAAR ID already exists")
+    files={k:kyc_read(f,PKYC[k]) for k,f in(("birth_certificate",birth_certificate),("photo_id",photo_id),("apaar_card",apaar_card))}
+    if old:drop_old(s,"patient",old)
+    pid=next_id(s,Patient,"MC")
+    s.add(Patient(id=pid,name=name.strip()[:80],dob=dob,sex=sex,blood=blood,allergies=allergies.strip()[:120] or "None known",state=state.strip()[:60],city=city.strip()[:60],pw=H(password),abha="Not linked",apaar=apaar,status="pending"))
+    save_kyc(s,"patient",pid,files);s.commit();return {"id":pid,"status":"pending"}
+
+@app.post("/signup/doctor")
+def signup_doctor(name:str=Form(...),speciality:str=Form(...),degree:str=Form(...),council:str=Form(...),reg_no:str=Form(...),hospital:str=Form(...),state:str=Form(...),city:str=Form(...),aadhaar:str=Form(...),password:str=Form(...),
+    degree_cert:UploadFile|None=File(None),reg_certificate:UploadFile|None=File(None),photo_id:UploadFile|None=File(None),s=Depends(db)):
+    aadhaar=re.sub(r"[\s-]","",aadhaar)
+    if not re.fullmatch(r"[2-9]\d{11}",aadhaar):raise HTTPException(400,"Aadhaar number must be 12 digits")
+    reg=re.sub(r"\s","",reg_no).upper()
+    if len(name.strip())<3 or len(reg)<4 or not all(x.strip() for x in(speciality,degree,council,hospital,state,city)):raise HTTPException(400,"Please fill in all details correctly")
+    strong(password);ah=hmac.new(SECRET,aadhaar.encode(),"sha256").hexdigest()
+    for old in s.scalars(select(Doctor).where(or_(Doctor.aadhaar_hash==ah,Doctor.reg_no==reg))):
+        if old.status!="rejected":raise HTTPException(409,"A doctor with this Aadhaar number or registration number already exists")
+    files={k:kyc_read(f,DKYC[k]) for k,f in(("degree_cert",degree_cert),("reg_certificate",reg_certificate),("photo_id",photo_id))}
+    for old in s.scalars(select(Doctor).where(or_(Doctor.aadhaar_hash==ah,Doctor.reg_no==reg))):drop_old(s,"doctor",old)
+    did=next_id(s,Doctor,"DR")
+    s.add(Doctor(id=did,name="Dr. "+re.sub(r"^dr\.?\s*","",name.strip(),flags=re.I)[:70],speciality=speciality.strip()[:60],state=state.strip()[:60],city=city.strip()[:60],pw=H(password),status="pending",reg_no=reg,council=council.strip()[:80],degree=degree.strip()[:60],hospital=hospital.strip()[:100],aadhaar_last4=aadhaar[-4:],aadhaar_hash=ah))
+    save_kyc(s,"doctor",did,files);s.commit();return {"id":did,"status":"pending"}
+
+@app.get("/admin/pending")
+def pending(u=Depends(who),s=Depends(db)):
+    need(u,"admin")
+    docs=lambda role,i,L:[{"id":k.id,"label":L.get(k.kind,k.kind),"fname":k.fname} for k in s.scalars(select(Kyc).options(defer(Kyc.file)).where(Kyc.owner_role==role,Kyc.owner_id==i))]
+    return [{"role":"patient","id":p.id,"name":p.name,"info":f"APAAR {p.apaar} | DOB {p.dob} | {p.sex}, {p.blood} | {p.city}, {p.state}","docs":docs("patient",p.id,PKYC)} for p in s.scalars(select(Patient).where(Patient.status=="pending"))]+\
+      [{"role":"doctor","id":d.id,"name":d.name,"info":f"{d.degree}, {d.speciality} | {d.council} reg. no. {d.reg_no} | {d.hospital} | Aadhaar ending {d.aadhaar_last4} | {d.city}, {d.state}","docs":docs("doctor",d.id,DKYC)} for d in s.scalars(select(Doctor).where(Doctor.status=="pending"))]
+
+@app.get("/admin/kyc/{kid}")
+def kyc_get(kid:int,u=Depends(who),s=Depends(db)):
+    need(u,"admin");k=s.get(Kyc,kid)
+    if not k:raise HTTPException(404,"Not found")
+    return Response(k.file,media_type=k.mime,headers={"Content-Disposition":f'inline; filename="{k.fname}"'})
+
+@app.post("/admin/review/{role}/{oid}/{act}")
+def review(role:str,oid:str,act:str,b:Review,u=Depends(who),s=Depends(db)):
+    need(u,"admin")
+    if role not in("doctor","patient") or act not in("approve","reject"):raise HTTPException(404,"Not found")
+    o=s.get(Doctor if role=="doctor" else Patient,oid)
+    if not o or o.status!="pending":raise HTTPException(400,"Nothing to review")
+    if act=="reject":
+        if not b.note.strip():raise HTTPException(400,"Give a reason for rejecting")
+        o.status="rejected";o.kyc_note=b.note.strip()[:200]
+    else:o.status="verified"
+    s.commit();return {"ok":True}

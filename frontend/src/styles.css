@@ -29,3 +29,4 @@ textarea{width:100%;margin:2px 0 12px}label.chk{display:flex;align-items:center;
 .slots{display:flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end}.slot{font-size:11px;font-weight:700;padding:3px 8px;border-radius:12px;background:#eef4f7;color:#5b7384}.slot.done{background:#dff3ea;color:#1c9b79}.slot.missed{background:#fdeedd;color:#c4731a}
 .logform{background:#f4f8fb;border-radius:12px;padding:12px;margin-top:10px}.logform .bar{margin:8px 0 0}
 .bar input[type=number],.bar input[type=date],.bar input[type=time]{min-width:0;flex:0 0 auto}.bar select{max-width:100%}
+label select{display:block;width:100%;margin-top:5px}
