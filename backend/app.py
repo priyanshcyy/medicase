@@ -19,9 +19,9 @@ SL=sessionmaker(eng);Base=declarative_base()
 H=lambda s:hashlib.sha256(s.encode()).hexdigest()
 
 class Doctor(Base):
-    __tablename__="doctors";id=Column(String,primary_key=True);status=Column(String,default="verified");kyc_note=Column(String,default="");reg_no=Column(String,index=True);council=Column(String);degree=Column(String);hospital=Column(String);aadhaar_last4=Column(String);aadhaar_hash=Column(String,index=True);name=Column(String);speciality=Column(String);state=Column(String);city=Column(String);pw=Column(String)
+    __tablename__="doctors";id=Column(String,primary_key=True);name=Column(String);speciality=Column(String);state=Column(String);city=Column(String);pw=Column(String)
 class Patient(Base):
-    __tablename__="patients";id=Column(String,primary_key=True);status=Column(String,default="verified");kyc_note=Column(String,default="");apaar=Column(String,index=True);name=Column(String);dob=Column(String);sex=Column(String);blood=Column(String);allergies=Column(String);state=Column(String,index=True);city=Column(String,index=True);pw=Column(String);code=Column(String,default="");code_exp=Column(String,default="");abha=Column(String,index=True)
+    __tablename__="patients";id=Column(String,primary_key=True);name=Column(String);dob=Column(String);sex=Column(String);blood=Column(String);allergies=Column(String);state=Column(String,index=True);city=Column(String,index=True);pw=Column(String);code=Column(String,default="");code_exp=Column(String,default="");abha=Column(String,index=True)
 class Document(Base):
     __tablename__="documents";id=Column(Integer,primary_key=True);patient_id=Column(String,ForeignKey("patients.id"),index=True);doctor_id=Column(String,ForeignKey("doctors.id"));kind=Column(String);title=Column(String);date=Column(String);body=Column(Text);fname=Column(String);mime=Column(String);file=Column(LargeBinary)
 class Consent(Base):
@@ -40,8 +40,6 @@ class Limit(Base):
     __tablename__="limits";patient_id=Column(String,primary_key=True);data=Column(Text,default="{}")
 class Appt(Base):
     __tablename__="appointments";id=Column(Integer,primary_key=True);patient_id=Column(String,index=True);doctor_id=Column(String,index=True);at=Column(String,index=True);reason=Column(String,default="");status=Column(String,default="scheduled");by=Column(String,default="doctor");note=Column(String,default="")
-class Kyc(Base):
-    __tablename__="kyc_docs";id=Column(Integer,primary_key=True);owner_role=Column(String,index=True);owner_id=Column(String,index=True);kind=Column(String);fname=Column(String);mime=Column(String);file=Column(LargeBinary);at=Column(String)
 Base.metadata.create_all(eng)
 
 def now(d=0):return (dt.datetime.now()+dt.timedelta(days=d)).strftime("%Y-%m-%d %H:%M")
@@ -91,14 +89,9 @@ class NewDoc(BaseModel):kind:str;title:str;date:str;body:str=""
 
 @app.post("/login")
 def login(b:Login,s=Depends(db)):
-    if b.role=="admin":
-        if not(hmac.compare_digest(b.id.strip().upper(),ADMIN_ID) and hmac.compare_digest(H(b.password),H(ADMIN_PW))):raise HTTPException(401,"Wrong ID or password")
-        return {"token":mint("admin",ADMIN_ID),"role":"admin","id":ADMIN_ID,"name":"Verification team","state":"","city":""}
     if b.role not in("doctor","patient"):raise HTTPException(400,"Bad role")
     o=s.get(Doctor if b.role=="doctor" else Patient,b.id.strip().upper())
     if not o or o.pw!=H(b.password):raise HTTPException(401,"Wrong ID or password")
-    if o.status=="pending":raise HTTPException(403,"Your account is waiting for verification. You can log in after the verification team approves your documents.")
-    if o.status=="rejected":raise HTTPException(403,"Your application was rejected: "+(o.kyc_note or "the documents could not be verified")+". Please sign up again with the correct documents.")
     return {"token":mint(b.role,o.id),"role":b.role,"id":o.id,"name":o.name,"state":o.state,"city":o.city}
 
 @app.get("/meta")
@@ -110,7 +103,7 @@ def meta(s=Depends(db)):
 @app.get("/patients")
 def plist(q:str="",state:str="",city:str="",u=Depends(who),s=Depends(db)):
     need(u,"doctor")
-    st=select(Patient).where(Patient.status=="verified").order_by(Patient.name).limit(60)
+    st=select(Patient).order_by(Patient.name).limit(60)
     if q:st=st.where(or_(Patient.name.ilike(f"%{q}%"),Patient.id.ilike(f"%{q}%"),Patient.abha.ilike(f"%{q}%")))
     if state:st=st.where(Patient.state==state)
     if city:st=st.where(Patient.city==city)
@@ -633,85 +626,3 @@ def my_appts(u=Depends(who),s=Depends(db)):
     f=lambda r:{"id":r.id,"doctor":dn.get(r.doctor_id,""),"at":r.at,"reason":r.reason,"status":r.status,"note":r.note}
     up=[f(r) for r in rows if r.status in("requested","scheduled") and r.at[:10]>=today];ids={x["id"] for x in up}
     return {"upcoming":up,"earlier":[f(r) for r in reversed(rows) if r.id not in ids][:8]}
-
-
-# ---------------- sign-up and verification ----------------
-ADMIN_ID=os.getenv("ADMIN_ID","ADM001").upper();ADMIN_PW=os.getenv("ADMIN_PASSWORD","admin123")  # change ADMIN_PASSWORD for any real use
-PKYC={"birth_certificate":"Birth certificate","photo_id":"Government photo ID","apaar_card":"APAAR ID card"}
-DKYC={"degree_cert":"Degree certificate","reg_certificate":"Medical council registration certificate","photo_id":"Government photo ID"}
-class Review(BaseModel):note:str=""
-def kyc_read(f,label):
-    data=f.file.read(5*1024*1024+1) if f and f.filename else b""
-    if not data:raise HTTPException(400,f"{label} is required")
-    if len(data)>5*1024*1024:raise HTTPException(400,f"{label} is larger than 5 MB")
-    m=sniff(data)
-    if not m:raise HTTPException(400,f"{label}: upload a PDF, JPG, PNG or WebP file")
-    return data,m,re.sub(r"[^\w.\- ]","_",f.filename)[:80]
-def strong(pw):
-    if len(pw)<8 or not re.search(r"[A-Za-z]",pw) or not re.search(r"\d",pw):raise HTTPException(400,"Password must be at least 8 characters and contain letters and numbers")
-def next_id(s,M,prefix):
-    n=[int(x[len(prefix):]) for x in s.scalars(select(M.id)) if x[len(prefix):].isdigit()]
-    return f"{prefix}{max(n or [1000])+1}"
-def save_kyc(s,role,oid,files):
-    for k,(data,m,fn) in files.items():s.add(Kyc(owner_role=role,owner_id=oid,kind=k,fname=fn,mime=m,file=data,at=now()))
-def drop_old(s,role,old):
-    s.query(Kyc).filter_by(owner_role=role,owner_id=old.id).delete();s.delete(old)
-
-@app.post("/signup/patient")
-def signup_patient(name:str=Form(...),dob:str=Form(...),sex:str=Form(...),blood:str=Form(...),state:str=Form(...),city:str=Form(...),apaar:str=Form(...),password:str=Form(...),allergies:str=Form("None known"),
-    birth_certificate:UploadFile|None=File(None),photo_id:UploadFile|None=File(None),apaar_card:UploadFile|None=File(None),s=Depends(db)):
-    apaar=re.sub(r"[\s-]","",apaar)
-    if not re.fullmatch(r"\d{12}",apaar):raise HTTPException(400,"APAAR ID must be exactly 12 digits")
-    try:d=dt.date.fromisoformat(dob)
-    except ValueError:raise HTTPException(400,"Enter a valid date of birth")
-    if d>dt.date.today() or d.year<1900:raise HTTPException(400,"Enter a valid date of birth")
-    if len(name.strip())<3 or sex not in("Male","Female","Other") or blood not in("A+","A-","B+","B-","AB+","AB-","O+","O-") or not state.strip() or not city.strip():raise HTTPException(400,"Please fill in all details correctly")
-    strong(password)
-    old=s.scalar(select(Patient).where(Patient.apaar==apaar))
-    if old and old.status!="rejected":raise HTTPException(409,"An account with this APAAR ID already exists")
-    files={k:kyc_read(f,PKYC[k]) for k,f in(("birth_certificate",birth_certificate),("photo_id",photo_id),("apaar_card",apaar_card))}
-    if old:drop_old(s,"patient",old)
-    pid=next_id(s,Patient,"MC")
-    s.add(Patient(id=pid,name=name.strip()[:80],dob=dob,sex=sex,blood=blood,allergies=allergies.strip()[:120] or "None known",state=state.strip()[:60],city=city.strip()[:60],pw=H(password),abha="Not linked",apaar=apaar,status="pending"))
-    save_kyc(s,"patient",pid,files);s.commit();return {"id":pid,"status":"pending"}
-
-@app.post("/signup/doctor")
-def signup_doctor(name:str=Form(...),speciality:str=Form(...),degree:str=Form(...),council:str=Form(...),reg_no:str=Form(...),hospital:str=Form(...),state:str=Form(...),city:str=Form(...),aadhaar:str=Form(...),password:str=Form(...),
-    degree_cert:UploadFile|None=File(None),reg_certificate:UploadFile|None=File(None),photo_id:UploadFile|None=File(None),s=Depends(db)):
-    aadhaar=re.sub(r"[\s-]","",aadhaar)
-    if not re.fullmatch(r"[2-9]\d{11}",aadhaar):raise HTTPException(400,"Aadhaar number must be 12 digits")
-    reg=re.sub(r"\s","",reg_no).upper()
-    if len(name.strip())<3 or len(reg)<4 or not all(x.strip() for x in(speciality,degree,council,hospital,state,city)):raise HTTPException(400,"Please fill in all details correctly")
-    strong(password);ah=hmac.new(SECRET,aadhaar.encode(),"sha256").hexdigest()
-    for old in s.scalars(select(Doctor).where(or_(Doctor.aadhaar_hash==ah,Doctor.reg_no==reg))):
-        if old.status!="rejected":raise HTTPException(409,"A doctor with this Aadhaar number or registration number already exists")
-    files={k:kyc_read(f,DKYC[k]) for k,f in(("degree_cert",degree_cert),("reg_certificate",reg_certificate),("photo_id",photo_id))}
-    for old in s.scalars(select(Doctor).where(or_(Doctor.aadhaar_hash==ah,Doctor.reg_no==reg))):drop_old(s,"doctor",old)
-    did=next_id(s,Doctor,"DR")
-    s.add(Doctor(id=did,name="Dr. "+re.sub(r"^dr\.?\s*","",name.strip(),flags=re.I)[:70],speciality=speciality.strip()[:60],state=state.strip()[:60],city=city.strip()[:60],pw=H(password),status="pending",reg_no=reg,council=council.strip()[:80],degree=degree.strip()[:60],hospital=hospital.strip()[:100],aadhaar_last4=aadhaar[-4:],aadhaar_hash=ah))
-    save_kyc(s,"doctor",did,files);s.commit();return {"id":did,"status":"pending"}
-
-@app.get("/admin/pending")
-def pending(u=Depends(who),s=Depends(db)):
-    need(u,"admin")
-    docs=lambda role,i,L:[{"id":k.id,"label":L.get(k.kind,k.kind),"fname":k.fname} for k in s.scalars(select(Kyc).options(defer(Kyc.file)).where(Kyc.owner_role==role,Kyc.owner_id==i))]
-    return [{"role":"patient","id":p.id,"name":p.name,"info":f"APAAR {p.apaar} | DOB {p.dob} | {p.sex}, {p.blood} | {p.city}, {p.state}","docs":docs("patient",p.id,PKYC)} for p in s.scalars(select(Patient).where(Patient.status=="pending"))]+\
-      [{"role":"doctor","id":d.id,"name":d.name,"info":f"{d.degree}, {d.speciality} | {d.council} reg. no. {d.reg_no} | {d.hospital} | Aadhaar ending {d.aadhaar_last4} | {d.city}, {d.state}","docs":docs("doctor",d.id,DKYC)} for d in s.scalars(select(Doctor).where(Doctor.status=="pending"))]
-
-@app.get("/admin/kyc/{kid}")
-def kyc_get(kid:int,u=Depends(who),s=Depends(db)):
-    need(u,"admin");k=s.get(Kyc,kid)
-    if not k:raise HTTPException(404,"Not found")
-    return Response(k.file,media_type=k.mime,headers={"Content-Disposition":f'inline; filename="{k.fname}"'})
-
-@app.post("/admin/review/{role}/{oid}/{act}")
-def review(role:str,oid:str,act:str,b:Review,u=Depends(who),s=Depends(db)):
-    need(u,"admin")
-    if role not in("doctor","patient") or act not in("approve","reject"):raise HTTPException(404,"Not found")
-    o=s.get(Doctor if role=="doctor" else Patient,oid)
-    if not o or o.status!="pending":raise HTTPException(400,"Nothing to review")
-    if act=="reject":
-        if not b.note.strip():raise HTTPException(400,"Give a reason for rejecting")
-        o.status="rejected";o.kyc_note=b.note.strip()[:200]
-    else:o.status="verified"
-    s.commit();return {"ok":True}

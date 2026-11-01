@@ -1,4 +1,3 @@
-import {Signup,Admin} from "./Signup.jsx"
 import {DoctorAppts,PatientAppts} from "./Appointments.jsx"
 import {useState,useEffect} from "react"
 import {api,upload,setToken} from "./api.js"
@@ -6,21 +5,20 @@ import {Dashboard,Messages,Today,Alerts} from "./Monitor.jsx"
 const KINDS=["Birth","Vaccination","Illness","Surgery","Prescription","Report","Discharge","X-ray","Scan","Other"]
 
 export default function App(){
-  const [me,setMe]=useState(null),[signup,setSignup]=useState(false)
-  if(!me)return signup?<Signup back={()=>setSignup(false)}/>:<Login onLogin={u=>{setToken(u.token);setMe(u)}} onSignup={()=>setSignup(true)}/>
+  const [me,setMe]=useState(null)
+  if(!me)return <Login onLogin={u=>{setToken(u.token);setMe(u)}}/>
   return <div className="app"><header><b>✚ MediCase</b><span>{me.name} · {me.role}{me.city?` · ${me.city}`:""}</span><button className="ghost" onClick={()=>{setToken("");setMe(null)}}>Log out</button></header>
-    {me.role==="admin"?<Admin/>:me.role==="doctor"?<Doctor me={me}/>:<Patient me={me}/>}</div>
+    {me.role==="doctor"?<Doctor me={me}/>:<Patient me={me}/>}</div>
 }
 
-function Login({onLogin,onSignup}){
+function Login({onLogin}){
   const [role,setRole]=useState("doctor"),[id,setId]=useState(""),[pw,setPw]=useState(""),[err,setErr]=useState("")
   const go=async e=>{e.preventDefault();try{onLogin(await api("/login",{body:{role,id,password:pw}}))}catch(x){setErr(x.message)}}
   return <div className="gate"><form className="box" onSubmit={go}><h2>✚ MediCase</h2><p className="muted">Smarter Records. Better Continuity. Secure Care.</p>
-    <div className="tabs">{(location.hash==="#admin"?["doctor","patient","admin"]:["doctor","patient"]).map(r=><button type="button" key={r} className={role===r?"on":""} onClick={()=>{setRole(r);setErr("")}}>{({doctor:"Doctor",patient:"Patient",admin:"Admin"})[r]} login</button>)}</div>
-    <label>{role==="doctor"?"Doctor ID":role==="admin"?"Admin ID":"Patient ID"}<input value={id} onChange={e=>setId(e.target.value)} required/></label>
+    <div className="tabs">{["doctor","patient"].map(r=><button type="button" key={r} className={role===r?"on":""} onClick={()=>{setRole(r);setErr("")}}>{r==="doctor"?"Doctor":"Patient"} login</button>)}</div>
+    <label>{role==="doctor"?"Doctor ID":"Patient ID"}<input value={id} onChange={e=>setId(e.target.value)} required/></label>
     <label>Password<input type="password" value={pw} onChange={e=>setPw(e.target.value)} required/></label>
     <p className="err">{err}</p><button className="btn wide">Log in</button>
-    <button type="button" className="link" onClick={onSignup}>New here? Create an account</button>
     <p className="muted small">Demo: DR1001 / doc123 · MC1001 / pat123. Synthetic data only.</p></form></div>
 }
 
